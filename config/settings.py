@@ -31,7 +31,7 @@ ALLOWED_HOSTS = []
 # Application definition
 
 INSTALLED_APPS = [
-    'config.apps.ReviewsAdminConfig',#'django.contrib.admin',
+    'config.apps.BookrAdminConfig',#'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
