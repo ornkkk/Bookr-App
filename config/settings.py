@@ -121,3 +121,4 @@ USE_TZ = True
 STATIC_URL = '/static/'
 ALLOWED_HOSTS = ['*']
 X_FRAME_OPTIONS = '*'
+STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]

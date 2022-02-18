@@ -10,8 +10,8 @@ class BookAdmin(admin.ModelAdmin):
 
 def initialled_name(obj):
     """
-  obj.first_names='Jerome David', obj.last_names='Salinger' => 'Salinger, JD'
-  """
+    obj.first_names='Jerome David', obj.last_names='Salinger' => 'Salinger, JD'
+    """
     initials = '. '.join([name[0] for name in obj.first_names.split(" ")])+'.'
     return f"{obj.last_names}, {initials}"
 
