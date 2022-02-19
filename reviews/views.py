@@ -60,3 +60,25 @@ def book_detail(request, pk):
     else:
         context = {"book": book, "book_rating": None, "reviews": None}
     return render(request, "reviews/book_detail.html", context)
+
+def publisher_edit(request, pk=None):
+    if pk is not None:
+        publisher = get_object_or_404(Publisher, pk=pk)
+    else:
+        publisher = None
+
+    if request.method == "POST":
+        form = PublisherForm(request.POST, instance=publisher)
+        if form.is_valid():
+            updated_publisher = form.save()
+            if publisher is None:
+                messages.success(request, "Publisher \"{}\" was created.".format(updated_publisher))
+            else:
+                messages.success(request, "Publisher \"{}\" was updated.".format(updated_publisher))
+
+            return redirect("publisher_edit", updated_publisher.pk)
+    else:
+        form = PublisherForm(instance=publisher)
+
+    return render(request, "reviews/instance-form.html",
+                  {"form": form, "instance": publisher, "model_type": "Publisher"})
