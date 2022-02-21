@@ -2,7 +2,7 @@ from django.contrib import messages
 from django.shortcuts import render, get_object_or_404, redirect
 from .models import Book, Review, Contributor, Publisher
 from .utils import average_rating
-from .forms import SearchForm, PublisherForm
+from .forms import PublisherForm, SearchForm, ReviewForm
 
 def index(request):
     return render(request, "base.html")
