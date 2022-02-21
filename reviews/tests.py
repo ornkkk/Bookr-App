@@ -1,168 +1,175 @@
-import os
 import re
-from unittest import mock
 
-from django import forms
-from django.conf import settings
-from django.core import management
-from django.http import HttpRequest
-from django.test import TestCase, Client
+from django.contrib.auth.models import User
+from django.test import Client
+from django.test import TestCase
+from django.utils import timezone
 
-from reviews.forms import SearchForm
-from reviews.views import book_search
+from reviews.forms import ReviewForm
+from reviews.models import Publisher, Book, Review
 
 
-class Activity1Test(TestCase):
-    @staticmethod
-    def load_csv():
-        """Run the loadcsv management command. This is only necessary on some tests."""
-        management.call_command('loadcsv', csv=os.path.join(settings.BASE_DIR, 'reviews', 'management', 'commands',
-                                                            'WebDevWithDjangoData.csv'))
+class Activity2Test(TestCase):
+    def setUp(self):
+        publisher_name = 'Test Edit Publisher'
+        publisher_website = 'http://www.example.com/edit-publisher/'
+        publisher_email = 'edit-publisher@example.com'
+        self.publisher = Publisher.objects.create(name=publisher_name, website=publisher_website, email=publisher_email)
+        Book.objects.create(title='Test Book', publication_date=timezone.now(), publisher=self.publisher, isbn=123456)
 
-    def test_search_form_fields(self):
-        """Test that the SearchForm is defined with the correct fields."""
-        sf = SearchForm()
-        self.assertEquals(len(sf.fields), 2)
-        self.assertIsInstance(sf.fields['search'], forms.CharField)
-        self.assertIsInstance(sf.fields['search_in'], forms.ChoiceField)
-        self.assertEquals(sf.fields['search_in'].choices[0][0], 'title')
-        self.assertEquals(sf.fields['search_in'].choices[0][1], 'Title')
+        User.objects.create(username='testuser', email='testuser@example.com')
+        User.objects.create(username='testuser2', email='testuser2@example.com')
 
-        self.assertEquals(sf.fields['search_in'].choices[1][0], 'contributor')
-        self.assertEquals(sf.fields['search_in'].choices[1][1], 'Contributor')
+    def test_rating_field(self):
+        """The rating field should be defined on the form manually."""
+        form = ReviewForm()
+        self.assertEquals(form.fields['rating'].min_value, 0)
+        self.assertEquals(form.fields['rating'].max_value, 5)
+        self.assertTrue(form.fields['rating'].required)
 
-    def test_form_validity(self):
+    def test_fields_and_labels_in_view(self):
+        """"
+        Test that fields and labels/headings exist in the rendered template.
         """
-        Test that SearchForm is valid when we expect: if search is empty or has more than 2 characters. It should also
-        be valid if search_in is empty, but not if it has a bad value.
+        c = Client()
+        response = c.get('/books/1/reviews/new/')
+
+        self.assertIsNotNone(re.search(r'<input type="hidden" name="csrfmiddlewaretoken" value="\w+">',
+                                       response.content.decode('utf8')))
+
+        self.assertIn(
+            b'<label for="id_content">Content:</label> <textarea name="content" cols="40" rows="10" '
+            b'required id="id_content">\n</textarea> <span class="helptext">The Review text.</span>',
+            response.content)
+        self.assertIn(
+            b'<label for="id_rating">Rating:</label> <input type="number" name="rating" min="0" max="5" required '
+            b'id="id_rating">', response.content)
+        self.assertIn(b'<label for="id_creator">Creator:</label>', response.content)
+        self.assertIn(b'<select name="creator" required id="id_creator">', response.content)
+        self.assertIn(b'<option value="" selected>---------</option>', response.content)
+        self.assertIn(b'<option value="1">testuser</option>', response.content)
+        self.assertIn(b'<option value="2">testuser2</option>', response.content)
+        self.assertNotIn(b'name="date_edited"', response.content)  # book should not be settable through form
+        self.assertNotIn(b'name="book"', response.content)  # book should not be settable through form
+        self.assertIn(b'<button type="submit" class="btn btn-primary">\n        Create\n    </button>',
+                      response.content)
+
+        self.assertIn(b'<p>For Book <em>Test Book (123456)</em></p>', response.content)
+
+    def test_review_create(self):
+        """Test review creation through the ReviewForm"""
+        c = Client()
+        review_content = 'A Great Book'
+        review_rating = 3
+        creator_id = 1
+
+        response = c.post('/books/1/reviews/new/', {
+            'content': review_content,
+            'rating': review_rating,
+            'creator': creator_id
+        })
+        review = Review.objects.get(pk=1)
+        self.assertEquals(review.content, review_content)
+        self.assertEquals(review.rating, review_rating)
+        self.assertEquals(review.creator_id, creator_id)
+        self.assertEquals(review.book_id, 1)
+        self.assertIsNone(review.date_edited)
+
+        # check redirect for the success message
+        response = c.get(response['location'])
+
+        condensed_content = re.sub(r'\s+', ' ', response.content.decode('utf8').replace('\n', ''))
+
+        self.assertIn(
+            '<div class="alert alert-success" role="alert"> Review for &quot;Test Book (123456)&quot; created. </div>',
+            condensed_content)
+
+    def test_review_no_create(self):
+        """Test that no Review is created if the form is invalid."""
+        self.assertEqual(Review.objects.all().count(), 0)
+        c = Client()
+
+        c.post('/books/1/reviews/new/', {
+            'content': '',
+            'rating': 6,
+            'creator': 0
+        })
+        self.assertEqual(Review.objects.all().count(), 0)
+
+    def test_review_book_mismatch(self):
+        """It should not be possible to load a review unless it's for the right book."""
+        b = Book.objects.create(title='Book2', publication_date=timezone.now(), publisher=self.publisher)
+        Review.objects.create(content='Great.', rating=3, creator_id=1, book=b)
+
+        c = Client()
+        self.assertEquals(c.get('/books/1/').status_code, 200)
+        self.assertEquals(c.get('/books/2/').status_code, 200)
+        self.assertEquals(c.get('/books/2/reviews/1/').status_code, 200)
+        self.assertEquals(c.get('/books/1/reviews/1/').status_code, 404)
+
+    def test_review_edit(self):
         """
+        Test editing a review, the initial form should have the values from the review being edited. Then no extra
+        review should be created.
+        """
+        review_content = 'A real good book.'
+        review_rating = 4
 
-        # These fixtures are a mini suite of tuples, in the form (valid, data dict)
-        fixtures = (
-            (True, {}),
-            (False, {'search': 'ab'}),
-            (True, {'search': 'abc'}),
-            (True, {'search': 'abc', 'search_in': 'title'}),
-            (True, {'search': 'abc', 'search_in': 'contributor'}),
-            (False, {'search': 'abc', 'search_in': 'bad'}),
-        )
+        Review.objects.create(content=review_content, rating=review_rating, creator_id=1, book_id=1)
 
-        for expected, form_data in fixtures:
-            sf = SearchForm(form_data)
-            self.assertEquals(sf.is_valid(), expected)
-
-    @mock.patch('reviews.views.render')
-    @mock.patch('reviews.views.SearchForm')
-    def test_book_search_without_input(self, mock_search_form_init, mock_render):
-        """The book search view should render with an empty set if no input is provided."""
-        mock_request = mock.MagicMock(name='request', spec=HttpRequest)
-        mock_search_form_init.return_value.is_valid.return_value = False
-        mock_request.GET = {}
-
-        resp = book_search(mock_request)
-
-        self.assertEquals(resp, mock_render.return_value)
-
-        mock_search_form_init.assert_called_with(mock_request.GET)
-        mock_render.assert_called_with(mock_request, 'reviews/search-results.html',
-                                       {'form': mock_search_form_init.return_value, 'search_text': '', 'books': set()})
-
-    @mock.patch('reviews.views.render')
-    @mock.patch('reviews.views.SearchForm')
-    def test_book_search_title(self, mock_search_form_init, mock_render):
-        """The book search view should render with title search results when searching and no search_in is provided."""
-        self.load_csv()
-
-        mock_request = mock.MagicMock(name='request', spec=HttpRequest)
-
-        mock_request.GET = {'search': 'keras'}
-
-        # this makes it easier to use assert_calls_with since we know what the 'form' item is
-        mock_search_form_init.return_value = SearchForm(mock_request.GET)
-
-        resp = book_search(mock_request)
-
-        self.assertEquals(resp, mock_render.return_value)
-
-        mock_search_form_init.assert_called_with(mock_request.GET)
-        self.assertEquals(mock_render.call_count, 1)
-
-        self.assertEquals(mock_render.call_args[0][0], mock_request)
-        self.assertEquals(mock_render.call_args[0][1], 'reviews/search-results.html')
-        self.assertEquals(mock_render.call_args[0][2]['form'], mock_search_form_init.return_value)
-        self.assertEquals(mock_render.call_args[0][2]['search_text'], 'keras')
-
-        self.assertEquals(len(mock_render.call_args[0][2]['books']), 1)
-        for book in mock_render.call_args[0][2]['books']:
-            self.assertEquals(book.title, 'Advanced Deep Learning with Keras')
-
-    @mock.patch('reviews.views.render')
-    @mock.patch('reviews.views.SearchForm')
-    def test_book_search_contributor(self, mock_search_form_init, mock_render):
-        """The book search view should render with contributor name search results when search_in is contributor."""
-        self.load_csv()
-
-        mock_request = mock.MagicMock(name='request', spec=HttpRequest)
-
-        mock_request.GET = {'search': 'king', 'search_in': 'contributor'}
-
-        # this makes it easier to use assert_calls_with since we know what the 'form' item is
-        mock_search_form_init.return_value = SearchForm(mock_request.GET)
-
-        resp = book_search(mock_request)
-
-        self.assertEquals(resp, mock_render.return_value)
-
-        mock_search_form_init.assert_called_with(mock_request.GET)
-        self.assertEquals(mock_render.call_count, 1)
-
-        self.assertEquals(mock_render.call_args[0][0], mock_request)
-        self.assertEquals(mock_render.call_args[0][1], 'reviews/search-results.html')
-        self.assertEquals(mock_render.call_args[0][2]['form'], mock_search_form_init.return_value)
-        self.assertEquals(mock_render.call_args[0][2]['search_text'], 'king')
-
-        self.assertEquals(len(mock_render.call_args[0][2]['books']), 1)
-        for book in mock_render.call_args[0][2]['books']:
-            self.assertEquals(book.title, 'The Talisman')
-
-    def test_base_template(self):
-        """Test that the base.html template has had the right form attributes added."""
-        with open(os.path.join(settings.BASE_DIR, 'templates', 'base.html')) as base_tp:
-            content = base_tp.read()
-
-        self.assertIn('<form action="{% url \'book_search\' %}"', content)
-        self.assertIn('name="search" value="{{ search_text }}" minlength="3">', content)
-        self.assertIn('<title>{% block title %}Bookr{% endblock %}</title>', content)
-
-    def test_page_no_search(self):
-        """Test the parts of the page when no search is specified."""
-        self.load_csv()
         c = Client()
-        resp = c.get('/book-search/')
 
-        self.assertIn('<title>Book Search</title>', re.sub('\n\s*', '', resp.content.decode('utf8')))
-        self.assertNotIn(b'<h3>Search Results for', resp.content)
-        self.assertNotIn(b'<span class="text-info">Title: </span>', resp.content)
+        response = c.get('/books/1/reviews/1/')
 
-    def test_page_with_search(self):
-        """Test the parts of the page when a search is specified."""
-        self.load_csv()
+        self.assertIn(b'<input type="number" name="rating" value="4" min="0" max="5" required id="id_rating">',
+                      response.content)
+        self.assertIn(b'<option value="1" selected>', response.content)
+        self.assertIn(b'<textarea name="content" cols="40" rows="10" required id="id_content">\nA real good book.'
+                      b'</textarea>', response.content)
+        self.assertIn(b'<button type="submit" class="btn btn-primary">\n        Save\n    </button>',
+                      response.content)
+
+        response = c.post('/books/1/reviews/1/', {
+            'content': 'Changed my mind',
+            'rating': 1,
+            'creator': 2
+        })
+
+        review = Review.objects.get()
+        self.assertEquals(review.content, 'Changed my mind')
+        self.assertEquals(review.rating, 1)
+        self.assertEquals(review.creator_id, 2)
+        self.assertEquals(review.book_id, 1)
+        # the messages will be on the redirected to page
+
+        response = c.get(response['location'])
+
+        condensed_content = re.sub(r'\s+', ' ', response.content.decode('utf8').replace('\n', ''))
+
+        self.assertIn(
+            '<div class="alert alert-success" role="alert"> Review for &quot;Test Book (123456)&quot; updated. </div>',
+            condensed_content)
+
+    def test_404_responses(self):
+        """
+        When trying to get a review for a book that does exist, or get a review that doesn't exist, we should get a 404.
+        """
         c = Client()
-        resp = c.get('/book-search/?search=keras')
+        response = c.get('/books/123/reviews/new/')
+        self.assertEquals(response.status_code, 404)
 
-        self.assertIn('<title>Search Results for "keras"</title>', re.sub('\n\s*', '', resp.content.decode('utf8')))
-        self.assertIn(b'<h3>Search Results for <em>keras</em></h3>', resp.content)
-        self.assertIn(b'<a href="/books/1/">Advanced Deep Learning with Keras (9781788629416)</a>', resp.content)
-        self.assertIn(b'<span class="text-info">Contributors: </span>', resp.content)
-        self.assertIn(b'Rowel Atienza', resp.content)
+        response = c.get('/books/1/reviews/123/')
+        self.assertEquals(response.status_code, 404)
 
-    def test_page_with_search_no_results(self):
-        """Test the parts of the page when a search is specified."""
-        self.load_csv()
+    def test_add_review_link(self):
+        """The add review link should display on the Book detail page."""
         c = Client()
-        resp = c.get('/book-search/?search=abc123')
+        response = c.get('/books/1/')
+        self.assertIn(b'<a class="btn btn-primary" href="/books/1/reviews/new/">Add Review</a>', response.content)
 
-        self.assertIn('<title>Search Results for "abc123"</title>', re.sub('\n\s*', '', resp.content.decode('utf8')))
-        self.assertIn(b'<h3>Search Results for <em>abc123</em></h3>', resp.content)
-        self.assertIn(b'<li class="list-group-item">No results found.</li>', resp.content)
-        self.assertNotIn(b'<span class="text-info">Title: </span>', resp.content)
+    def test_review_display(self):
+        """We should see a link to edit a review after creating one."""
+        Review.objects.create(content="Abc123", rating=2, creator_id=1, book_id=1)
+        c = Client()
+        response = c.get('/books/1/')
+        self.assertIn(b'<a href="/books/1/reviews/1/">Edit Review</a>', response.content)
