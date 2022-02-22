@@ -21,6 +21,14 @@ class Book(models.Model):
                           verbose_name="ISBN")
   publisher = models.ForeignKey(Publisher,
                                 on_delete=models.CASCADE, default=-1)
+  contributors = models.ManyToManyField('Contributor',
+                                        through="BookContributor")
+  cover = models.ImageField(null=True,
+                              blank=True,
+                              upload_to="book_covers/")
+  sample = models.FileField(null=True,
+                              blank=True,
+                              upload_to="book_samples/")
 
   def __str__(self):
     return f"{self.title} (ISBN: {self.isbn})"
@@ -36,8 +44,7 @@ class Contributor(models.Model):
   last_names = models.CharField(max_length=50,
                                 help_text="The contributor's last name or names.")
   email = models.EmailField(help_text="The contact email of the contributor.")
-  contributors = models.ManyToManyField('Contributor',
-                                        through="BookContributor")
+  
 
   def __str__(self):
     return self.first_names
